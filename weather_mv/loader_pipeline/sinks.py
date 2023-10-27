@@ -156,7 +156,9 @@ def _preprocess_tif(ds: xr.Dataset, filename: str, tif_metadata_for_start_time: 
 
     ds['y'] = lat[0, :]
     ds['x'] = lon[:, 0]
-    ds = ds.rename({'y': 'latitude', 'x': 'longitude'})
+    # ds = ds.rename({'y': 'latitude', 'x': 'longitude'})
+    ds['y'].attrs['long_name'] = 'latitude'
+    ds['x'].attrs['long_name'] = 'longitude'
 
     ds = ds.squeeze().drop_vars('spatial_ref')
 

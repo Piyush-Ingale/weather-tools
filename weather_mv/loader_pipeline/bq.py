@@ -30,6 +30,7 @@ from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.transforms import window
 from google.cloud import bigquery
 from xarray.core.utils import ensure_us_time_resolution
+import pandas as pd
 
 from .sinks import ToDataSink, open_dataset
 from .util import (
@@ -222,7 +223,7 @@ class ToBigQuery(ToDataSink):
             logger.error(f'Unable to create table in BigQuery: {e}')
             raise
 
-    def prepare_coordinates(self, uri: str) -> t.Iterator[t.Tuple[str, t.List[t.Dict]]]:
+    def prepare_coordinates(self, uri: str) -> t.Iterator[t.Dict]:
         """Open the dataset, filter by area, and prepare chunks of coordinates for parallel ingestion into BigQuery."""
         logger.info(f'Preparing coordinates for: {uri!r}.')
 
@@ -234,8 +235,14 @@ class ToBigQuery(ToDataSink):
                 data_ds = data_ds.sel(latitude=slice(n, s), longitude=slice(w, e))
                 logger.info(f'Data filtered by area, size: {data_ds.nbytes}')
 
-            for chunk in ichunked(get_coordinates(data_ds, uri), self.coordinate_chunk_size):
-                yield uri, list(chunk)
+            # for chunk in ichunked(get_coordinates(data_ds, uri), self.coordinate_chunk_size):
+            #     yield uri, list(chunk)
+            # Re-calculate import time for streaming extractions.
+            if not self.import_time:
+                self.import_time = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
+            df = data_ds.to_dataframe().reset_index()
+            data_ds.attrs[DATA_URI_COLUMN] = self.first_uri
+            yield from self.to_rows(df[:], data_ds, uri)
 
     def extract_rows(self, uri: str, coordinates: t.List[t.Dict]) -> t.Iterator[t.Dict]:
         """Reads an asset and coordinates, then yields its rows as a mapping of column names to values."""
@@ -250,30 +257,41 @@ class ToBigQuery(ToDataSink):
             data_ds: xr.Dataset = _only_target_vars(ds, self.variables)
             yield from self.to_rows(coordinates, data_ds, uri)
 
-    def to_rows(self, coordinates: t.Iterable[t.Dict], ds: xr.Dataset, uri: str) -> t.Iterator[t.Dict]:
+    def convert_time(self, val) -> t.Any:
+        """Converts pandas Timestamp values to ISO format."""
+        if isinstance(val, pd.Timestamp):
+            return val.replace(tzinfo=datetime.timezone.utc).isoformat()
+        elif isinstance(val, pd.Timedelta):
+            return val.total_seconds()
+        else:
+            return val
+
+    def to_rows(self, rows: pd.DataFrame, ds: xr.Dataset, uri: str) -> t.Iterator[t.Dict]:
         first_ts_raw = (
             ds.time[0].values if isinstance(ds.time.values, np.ndarray)
             else ds.time.values
         )
         first_time_step = to_json_serializable_type(first_ts_raw)
-        for it in coordinates:
+        for _, row in rows.iterrows():
+            row = row.astype(object).where(pd.notnull(row), None)
+            row = {k: self.convert_time(v) for k, v in row.items()}
             # Use those index values to select a Dataset containing one row of data.
-            row_ds = ds.loc[it]
+            # row_ds = ds.loc[it]
 
             # Create a Name-Value map for data columns. Result looks like:
             # {'d': -2.0187, 'cc': 0.007812, 'z': 50049.8, 'rr': None}
-            row = {n: to_json_serializable_type(ensure_us_time_resolution(v.values))
-                   for n, v in row_ds.data_vars.items()}
+            # row = {n: to_json_serializable_type(ensure_us_time_resolution(v.values))
+            #        for n, v in row_ds.data_vars.items()}
 
             # Serialize coordinates.
-            it = {k: to_json_serializable_type(v) for k, v in it.items()}
+            # it = {k: to_json_serializable_type(v) for k, v in it.items()}
 
             # Add indexed coordinates.
-            row.update(it)
+            # row.update(it)
             # Add un-indexed coordinates.
-            for c in row_ds.coords:
-                if c not in it and (not self.variables or c in self.variables):
-                    row[c] = to_json_serializable_type(ensure_us_time_resolution(row_ds[c].values))
+            # for c in row_ds.coords:
+            #     if c not in it and (not self.variables or c in self.variables):
+            #         row[c] = to_json_serializable_type(ensure_us_time_resolution(row_ds[c].values))
 
             # Add import metadata.
             row[DATA_IMPORT_TIME_COLUMN] = self.import_time
@@ -306,8 +324,8 @@ class ToBigQuery(ToDataSink):
             extracted_rows = (
                 paths
                 | 'PrepareCoordinates' >> beam.FlatMap(self.prepare_coordinates)
-                | beam.Reshuffle()
-                | 'ExtractRows' >> beam.FlatMapTuple(self.extract_rows)
+                # | beam.Reshuffle()
+                # | 'ExtractRows' >> beam.FlatMapTuple(self.extract_rows)
             )
         else:
             xarray_open_dataset_kwargs = self.xarray_open_dataset_kwargs.copy()
@@ -336,6 +354,7 @@ class ToBigQuery(ToDataSink):
                 project=self.table.project,
                 dataset=self.table.dataset_id,
                 table=self.table.table_id,
+                schema=self.table._properties['schema'],
                 write_disposition=BigQueryDisposition.WRITE_APPEND,
                 create_disposition=BigQueryDisposition.CREATE_NEVER)
         )
