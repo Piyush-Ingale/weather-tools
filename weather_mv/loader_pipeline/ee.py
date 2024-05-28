@@ -244,6 +244,7 @@ class ToEarthEngine(ToDataSink):
     band_names_mapping: str
     initialization_time_regex: str
     forecast_time_regex: str
+    ingest_as_virtual_asset: bool
 
     @classmethod
     def add_parser_arguments(cls, subparser: argparse.ArgumentParser):
@@ -347,13 +348,21 @@ class ToEarthEngine(ToDataSink):
             with open(self.band_names_mapping, 'r', encoding='utf-8') as f:
                 band_names_dict = json.load(f)
         if not self.dry_run:
-            (
+            assets = (
                 paths
                 | 'FilterFiles' >> FilterFilesTransform.from_kwargs(**vars(self))
                 | 'ReshuffleFiles' >> beam.Reshuffle()
                 | 'ConvertToAsset' >> ConvertToAsset.from_kwargs(band_names_dict=band_names_dict, **vars(self))
-                | 'IngestIntoEE' >> IngestIntoEETransform.from_kwargs(**vars(self))
             )
+
+            if self.ee_asset_type == 'TABLE':
+                (
+                    assets
+                    | 'CombineAssetDataObjects' >> beam.CombineGlobally(CombibeAssetDataObjects())
+                    | 'IngestFeatureCollectionsToEE' >> IngestFeatureCollectionsToEE.from_kwargs(**vars(self))
+                )
+            else:
+                assets | 'IngestIntoEE' >> IngestIntoEETransform.from_kwargs(**vars(self))
         else:
             (
                 paths
@@ -748,3 +757,105 @@ class IngestIntoEETransform(SetupEarthEngine, KwargsFactoryMixin):
         beam.metrics.Metrics.counter('Success', 'IngestIntoEE').inc()
 
         yield asset_id
+
+
+class CombibeAssetDataObjects(beam.CombineFn):
+    """A CombineFn that merges all AssetData objects into a single list.
+    This CombineFn aggregates all the elements of a PCollection into a list.
+    """
+    def create_accumulator(self):
+        return []
+
+    def add_input(self, accumulator, element):
+        accumulator.append(element)
+        return accumulator
+
+    def merge_accumulators(self, accumulators):
+        merged = []
+        for a in accumulators:
+            for item in a:
+                merged.append(item)
+        return merged
+
+    def extract_output(self, accumulator):
+        return accumulator
+
+
+class IngestFeatureCollectionsToEE(SetupEarthEngine, KwargsFactoryMixin):
+    """"""
+    def __init__(self,
+                 ee_qps: int,
+                 ee_latency: float,
+                 ee_max_concurrent: int,
+                 private_key: str,
+                 service_account: str,
+                 use_personal_account: bool,):
+        """Sets up rate limit."""
+        super().__init__(ee_qps=ee_qps,
+                         ee_latency=ee_latency,
+                         ee_max_concurrent=ee_max_concurrent,
+                         private_key=private_key,
+                         service_account=service_account,
+                         use_personal_account=use_personal_account,)
+
+    def ee_tasks_remaining(self) -> int:
+        """Returns the remaining number of tasks in the tassk queue of earth engine."""
+        return len([task for task in ee.data.getTaskList()
+                    if task['state'] in ['UNSUBMITTED', 'READY', 'RUNNING']])
+
+    def get_vacant_space_in_queue(self) -> None:
+        """Waits until the task queue has space. And returns the vacant space in queue.
+
+        Ingestion of table in the earth engine creates a task and every project has a limited task queue size. This
+        function checks the task queue size and waits until the task queue has some space.
+        """
+        task_queue = self.ee_tasks_remaining()
+        while task_queue >= self._num_shards:
+            time.sleep(TASK_QUEUE_WAIT_TIME)
+            task_queue = self.ee_tasks_remaining()
+
+        return self._num_shards - task_queue
+
+
+    @retry.with_exponential_backoff(
+        num_retries=NUM_RETRIES,
+        logger=logger.warning,
+        initial_delay_secs=INITIAL_DELAY,
+        max_delay_secs=MAX_DELAY
+    )
+    def ingest_table(self, task_id: str, asset_data: AssetData) -> str:
+        self.check_setup()
+        asset_name = os.path.join(self.ee_asset, asset_data.name)
+        asset_data.properties['ingestion_time'] = get_utc_timestamp()
+
+        try:
+            logger.info(f"Uploading asset {asset_data.target_path} to Asset ID '{asset_name}'.")
+
+            response = ee.data.startTableIngestion(task_id, {
+                        'name': asset_name,
+                        'sources': [{
+                            'uris': [asset_data.target_path]
+                        }],
+                        'startTime': asset_data.start_time,
+                        'endTime': asset_data.end_time,
+                        'properties': asset_data.properties
+                    })
+            return response.get('id')
+        except ee.EEException as e:
+            logger.error(f"Failed to create asset '{asset_name}' in earth engine: {e}")
+
+    def process(self, asset_data_list: AssetData) -> t.Iterator[str]:
+        """Uploads an asset into the earth engine."""
+        
+        total_asset_count = len(asset_data_list)
+        count = 0
+        while count != total_asset_count-1:
+            new_taks_count = self.get_vacant_space_in_queue()
+            task_id_lists = ee.data.newTaskId(new_taks_count)
+            logger.info(f'Created {new_taks_count} task_ids.....')
+            for task_id in task_id_lists:
+                asset_id = self.ingest_table(task_id, asset_data_list[count])
+                beam.metrics.Metrics.counter('Success', 'IngestIntoEE').inc()
+                count+=1
+
+                yield asset_id
