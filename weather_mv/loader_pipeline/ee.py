@@ -793,7 +793,8 @@ class IngestFeatureCollectionsToEE(SetupEarthEngine, KwargsFactoryMixin):
                  ee_max_concurrent: int,
                  private_key: str,
                  service_account: str,
-                 use_personal_account: bool,):
+                 use_personal_account: bool,
+                 ee_asset:str,):
         """Sets up rate limit."""
         super().__init__(ee_qps=ee_qps,
                          ee_latency=ee_latency,
@@ -801,6 +802,7 @@ class IngestFeatureCollectionsToEE(SetupEarthEngine, KwargsFactoryMixin):
                          private_key=private_key,
                          service_account=service_account,
                          use_personal_account=use_personal_account,)
+        self.ee_asset = ee_asset
 
     def ee_tasks_remaining(self) -> int:
         """Returns the remaining number of tasks in the tassk queue of earth engine."""
@@ -853,6 +855,7 @@ class IngestFeatureCollectionsToEE(SetupEarthEngine, KwargsFactoryMixin):
         
         total_asset_count = len(asset_data_list)
         count = 0
+        self.check_setup()
         while count < total_asset_count:
             vacant_space = self.get_vacant_space_in_queue()
             remaining_assets_count = total_asset_count - count
