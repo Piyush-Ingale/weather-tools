@@ -358,7 +358,7 @@ class ToEarthEngine(ToDataSink):
             if self.ee_asset_type == 'TABLE':
                 (
                     assets
-                    | 'CombineAssetDataObjects' >> beam.CombineGlobally(CombibeAssetDataObjects())
+                    | 'CombineAssetDataObjects' >> beam.CombineGlobally(CombineAssetDataObjects())
                     | 'IngestFeatureCollectionsToEE' >> IngestFeatureCollectionsToEE.from_kwargs(**vars(self))
                 )
             else:
@@ -759,18 +759,21 @@ class IngestIntoEETransform(SetupEarthEngine, KwargsFactoryMixin):
         yield asset_id
 
 
-class CombibeAssetDataObjects(beam.CombineFn):
+class CombineAssetDataObjects(beam.CombineFn):
     """A CombineFn that merges all AssetData objects into a single list.
     This CombineFn aggregates all the elements of a PCollection into a list.
     """
     def create_accumulator(self):
+        """Initializes an empty list to collect elements."""
         return []
 
     def add_input(self, accumulator, element):
+        """Adds an element to the list."""
         accumulator.append(element)
         return accumulator
 
     def merge_accumulators(self, accumulators):
+        """Merges multiple lists into single list."""
         merged = []
         for a in accumulators:
             for item in a:
@@ -778,6 +781,7 @@ class CombibeAssetDataObjects(beam.CombineFn):
         return merged
 
     def extract_output(self, accumulator):
+        """Returns the final merged list."""
         return accumulator
 
 
@@ -849,10 +853,12 @@ class IngestFeatureCollectionsToEE(SetupEarthEngine, KwargsFactoryMixin):
         
         total_asset_count = len(asset_data_list)
         count = 0
-        while count != total_asset_count-1:
-            new_taks_count = self.get_vacant_space_in_queue()
-            task_id_lists = ee.data.newTaskId(new_taks_count)
-            logger.info(f'Created {new_taks_count} task_ids.....')
+        while count < total_asset_count:
+            vacant_space = self.get_vacant_space_in_queue()
+            remaining_assets_count = total_asset_count - count
+            new_tasks = vacant_space if vacant_space < remaining_assets_count else remaining_assets_count
+            task_id_lists = ee.data.newTaskId(new_tasks)
+            logger.info(f'Created {new_tasks} task_ids.....')
             for task_id in task_id_lists:
                 asset_id = self.ingest_table(task_id, asset_data_list[count])
                 beam.metrics.Metrics.counter('Success', 'IngestIntoEE').inc()
