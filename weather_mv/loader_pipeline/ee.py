@@ -358,8 +358,10 @@ class ToEarthEngine(ToDataSink):
             if self.ee_asset_type == 'TABLE':
                 (
                     assets
-                    | 'CombineAssetDataObjects' >> beam.CombineGlobally(CombineAssetDataObjects())
-                    | 'IngestFeatureCollectionsToEE' >> IngestFeatureCollectionsToEE.from_kwargs(**vars(self))
+                    | 'CombineAssetDataObjects'
+                    >> beam.CombineGlobally(CombineAssetDataObjects())
+                    | 'IngestFeatureCollectionsToEE'
+                    >> IngestFeatureCollectionsToEE.from_kwargs(**vars(self))
                 )
             else:
                 assets | 'IngestIntoEE' >> IngestIntoEETransform.from_kwargs(**vars(self))
@@ -646,20 +648,6 @@ class IngestIntoEETransform(SetupEarthEngine, KwargsFactoryMixin):
     def get_project_id(self) -> str:
         return self.ee_asset.split('/')[1]
 
-    def ee_tasks_remaining(self) -> int:
-        """Returns the remaining number of tasks in the tassk queue of earth engine."""
-        return len([task for task in ee.data.getTaskList()
-                    if task['state'] in ['UNSUBMITTED', 'READY', 'RUNNING']])
-
-    def wait_for_task_queue(self) -> None:
-        """Waits until the task queue has space.
-
-        Ingestion of table in the earth engine creates a task and every project has a limited task queue size. This
-        function checks the task queue size and waits until the task queue has some space.
-        """
-        while self.ee_tasks_remaining() >= self._num_shards:
-            time.sleep(TASK_QUEUE_WAIT_TIME)
-
     @retry.with_exponential_backoff(
         num_retries=NUM_RETRIES,
         logger=logger.warning,
@@ -675,69 +663,55 @@ class IngestIntoEETransform(SetupEarthEngine, KwargsFactoryMixin):
         try:
             logger.info(f"Uploading asset {asset_data.target_path} to Asset ID '{asset_name}'.")
 
-            if self.ee_asset_type == 'IMAGE':  # Ingest an image.
-                if self.ingest_as_virtual_asset:  # as a virtual image.
-                    creds = compute_engine.Credentials()
-                    session = AuthorizedSession(creds)
+            if self.ingest_as_virtual_asset:  # Ingest an image as a virtual image.
+                creds = compute_engine.Credentials()
+                session = AuthorizedSession(creds)
 
-                    # Makes an api call to register the virtual asset.
-                    response = session.post(
-                        url=(
-                            f'https://earthengine-highvolume.googleapis.com/v1/projects/{self.get_project_id()}/'
-                            f'image:import?overwrite=true&mode=VIRTUAL'
-                        ),
-                        data=json.dumps({
-                            "imageManifest": {
-                                'name': asset_name,
-                                "tilesets": [
-                                    {
-                                        "id": "0",
-                                        "sources": {"uris": [asset_data.target_path]},
-                                    }
-                                ],
-                                'startTime': asset_data.start_time,
-                                'endTime': asset_data.end_time,
-                                'properties': asset_data.properties,
-                            },
-                            "overwrite": True,
-                        }),
-                        headers={
-                            'Content-Type': 'application/json',
-                            'x-goog-user-project': self.get_project_id(),
-                        }
-                    )
-
-                    if response.status_code != 200:
-                        logger.info(f"Failed to ingest virtual asset '{asset_name}' in earth engine: {response.text}")
-                        raise ee.EEException(response.text)
-
-                    response_json = json.loads(response.content)
-                    return response_json.get('name')
-                else:  # as a COG based image.
-                    result = ee.data.createAsset({
-                        'name': asset_name,
-                        'type': self.ee_asset_type,
-                        'gcs_location': {
-                            'uris': [asset_data.target_path]
+                # Makes an api call to register the virtual asset.
+                response = session.post(
+                    url=(
+                        f'https://earthengine-highvolume.googleapis.com/v1/projects/{self.get_project_id()}/'
+                        f'image:import?overwrite=true&mode=VIRTUAL'
+                    ),
+                    data=json.dumps({
+                        "imageManifest": {
+                            'name': asset_name,
+                            "tilesets": [
+                                {
+                                    "id": "0",
+                                    "sources": {"uris": [asset_data.target_path]},
+                                }
+                            ],
+                            'startTime': asset_data.start_time,
+                            'endTime': asset_data.end_time,
+                            'properties': asset_data.properties,
                         },
-                        'startTime': asset_data.start_time,
-                        'endTime': asset_data.end_time,
-                        'properties': asset_data.properties,
-                    })
-                    return result.get('id')
-            elif self.ee_asset_type == 'TABLE':  # ingest a feature collection.
-                self.wait_for_task_queue()
-                task_id = ee.data.newTaskId(1)[0]
-                response = ee.data.startTableIngestion(task_id, {
+                        "overwrite": True,
+                    }),
+                    headers={
+                        'Content-Type': 'application/json',
+                        'x-goog-user-project': self.get_project_id(),
+                    }
+                )
+
+                if response.status_code != 200:
+                    logger.info(f"Failed to ingest virtual asset '{asset_name}' in earth engine: {response.text}")
+                    raise ee.EEException(response.text)
+
+                response_json = json.loads(response.content)
+                return response_json.get('name')
+            else:  # as a COG based image.
+                result = ee.data.createAsset({
                     'name': asset_name,
-                    'sources': [{
+                    'type': self.ee_asset_type,
+                    'gcs_location': {
                         'uris': [asset_data.target_path]
-                    }],
+                    },
                     'startTime': asset_data.start_time,
                     'endTime': asset_data.end_time,
-                    'properties': asset_data.properties
+                    'properties': asset_data.properties,
                 })
-                return response.get('id')
+                return result.get('id')
         except ee.EEException as e:
             if "Could not parse a valid CRS from the first overview of the GeoTIFF" in repr(e):
                 logger.info(f"Failed to create asset '{asset_name}' in earth engine: {e}. Moving on...")
@@ -763,6 +737,7 @@ class CombineAssetDataObjects(beam.CombineFn):
     """A CombineFn that merges all AssetData objects into a single list.
     This CombineFn aggregates all the elements of a PCollection into a list.
     """
+
     def create_accumulator(self):
         """Initializes an empty list to collect elements."""
         return []
@@ -786,7 +761,7 @@ class CombineAssetDataObjects(beam.CombineFn):
 
 
 class IngestFeatureCollectionsToEE(SetupEarthEngine, KwargsFactoryMixin):
-    """"""
+    """Ingests Feature Collection into earth engine and yields asset id."""
     def __init__(self,
                  ee_qps: int,
                  ee_latency: float,
@@ -794,7 +769,7 @@ class IngestFeatureCollectionsToEE(SetupEarthEngine, KwargsFactoryMixin):
                  private_key: str,
                  service_account: str,
                  use_personal_account: bool,
-                 ee_asset:str,):
+                 ee_asset: str,):
         """Sets up rate limit."""
         super().__init__(ee_qps=ee_qps,
                          ee_latency=ee_latency,
@@ -806,10 +781,15 @@ class IngestFeatureCollectionsToEE(SetupEarthEngine, KwargsFactoryMixin):
 
     def ee_tasks_remaining(self) -> int:
         """Returns the remaining number of tasks in the tassk queue of earth engine."""
-        return len([task for task in ee.data.getTaskList()
-                    if task['state'] in ['UNSUBMITTED', 'READY', 'RUNNING']])
+        return len(
+            [
+                task
+                for task in ee.data.getTaskList()
+                if task['state'] in ['UNSUBMITTED', 'READY', 'RUNNING']
+            ]
+        )
 
-    def get_vacant_space_in_queue(self) -> None:
+    def get_vacant_space_in_queue(self) -> int:
         """Waits until the task queue has space. And returns the vacant space in queue.
 
         Ingestion of table in the earth engine creates a task and every project has a limited task queue size. This
@@ -822,15 +802,15 @@ class IngestFeatureCollectionsToEE(SetupEarthEngine, KwargsFactoryMixin):
 
         return self._num_shards - task_queue
 
-
     @retry.with_exponential_backoff(
         num_retries=NUM_RETRIES,
         logger=logger.warning,
         initial_delay_secs=INITIAL_DELAY,
-        max_delay_secs=MAX_DELAY
+        max_delay_secs=MAX_DELAY,
     )
     def ingest_table(self, task_id: str, asset_data: AssetData) -> str:
-        self.check_setup()
+        """Creates task to ingest Feature Collection."""
+
         asset_name = os.path.join(self.ee_asset, asset_data.name)
         asset_data.properties['ingestion_time'] = get_utc_timestamp()
 
@@ -850,21 +830,25 @@ class IngestFeatureCollectionsToEE(SetupEarthEngine, KwargsFactoryMixin):
         except ee.EEException as e:
             logger.error(f"Failed to create asset '{asset_name}' in earth engine: {e}")
 
-    def process(self, asset_data_list: AssetData) -> t.Iterator[str]:
+    def process(self, asset_data_list: t.List[AssetData]) -> t.Iterator[str]:
         """Uploads an asset into the earth engine."""
-        
-        total_asset_count = len(asset_data_list)
-        count = 0
+
+        total_assets_count = len(asset_data_list)
+        asset_idx = 0
         self.check_setup()
-        while count < total_asset_count:
+        while asset_idx < total_assets_count:
             vacant_space = self.get_vacant_space_in_queue()
-            remaining_assets_count = total_asset_count - count
-            new_tasks = vacant_space if vacant_space < remaining_assets_count else remaining_assets_count
+            remaining_assets_count = total_assets_count - asset_idx
+            new_tasks = (
+                vacant_space
+                if vacant_space < remaining_assets_count
+                else remaining_assets_count
+            )
             task_id_lists = ee.data.newTaskId(new_tasks)
-            logger.info(f'Created {new_tasks} task_ids.....')
+            logger.info(f"Created {new_tasks} task_ids.....")
             for task_id in task_id_lists:
-                asset_id = self.ingest_table(task_id, asset_data_list[count])
+                asset_id = self.ingest_table(task_id, asset_data_list[asset_idx])
                 beam.metrics.Metrics.counter('Success', 'IngestIntoEE').inc()
-                count+=1
+                asset_idx += 1
 
                 yield asset_id
