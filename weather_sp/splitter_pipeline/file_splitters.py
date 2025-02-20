@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 def copy(src: str, dst: str) -> None:
     """Copy data via `gsutil cp`."""
     try:
-        subprocess.run(['gsutil', 'cp', src, dst], check=True, capture_output=True)
+        subprocess.run(['gcloud alpha storage', 'cp', src, dst], check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
         logger.error(f'Failed to copy file {src!r} to {dst!r} due to {e.stderr.decode("utf-8")}')
         raise
