@@ -24,6 +24,7 @@ import logging
 import random
 import typing as t
 from urllib.parse import urlparse
+import zlib
 
 import apache_beam as beam
 from apache_beam.transforms.window import FixedWindows
@@ -48,7 +49,7 @@ class GroupMessagesByFixedWindows(beam.PTransform):
                 | "Window into fixed intervals" >> beam.WindowInto(FixedWindows(self.window_size))
                 | "Add timestamp to windowed elements" >> beam.ParDo(AddTimestamp())
                 # Assign a random key to each windowed element based on the number of shards.
-                | "Add key" >> beam.WithKeys(lambda _: random.randint(0, self.num_shards - 1))
+                | "Add key" >> beam.WithKeys(lambda ele: zlib.crc32(ele[0].encode('utf-8')) % self.num_shards)
                 # Group windowed elements by key. All the elements in the same window must fit
                 # memory for this. If not, you need to use `beam.util.BatchElements`.
                 | "Group by key" >> beam.GroupByKey()
