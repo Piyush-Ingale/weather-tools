@@ -328,7 +328,9 @@ def validate_region(output_table: t.Optional[str] = None,
 
 
 def _shard(elem, num_shards: int):
-    return (np.random.randint(0, num_shards), elem)
+    shard = np.random.randint(0, num_shards)
+    logger.info(f"shard: {shard} element: {elem}")
+    return (shard, elem)
 
 
 class Shard(beam.DoFn):
@@ -413,11 +415,13 @@ class _RateLimitDoFn(beam.DoFn):
 
     def process(self, keyed_elem: t.Tuple[t.Any, t.Iterable[t.Any]]):
         shard, elems = keyed_elem
+        logger.info(f'RateLimit Elements: {elems}')
         logger.info(f'processing shard: {shard}')
 
         start_time = datetime.datetime.now()
         end_time = None
         for elem in elems:
+            logger.info(f'RateLimit per element: {elem}')
             if end_time is not None and (end_time - start_time) < self._wait_time:
                 logger.info(f'previous operation took: {(end_time - start_time).total_seconds()}')
                 wait_time = (self._wait_time - (end_time - start_time))
