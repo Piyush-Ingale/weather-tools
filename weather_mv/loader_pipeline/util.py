@@ -36,7 +36,7 @@ from google.api_core.exceptions import BadRequest
 from google.api_core.exceptions import NotFound
 from google.cloud import bigquery, storage
 from xarray.core.utils import ensure_us_time_resolution
-
+import zlib
 from .sinks import DEFAULT_COORD_KEYS
 from .metrics import timeit
 
@@ -328,7 +328,7 @@ def validate_region(output_table: t.Optional[str] = None,
 
 
 def _shard(elem, num_shards: int):
-    shard = np.random.randint(0, num_shards)
+    shard = zlib.crc32(elem.name.encode('utf-8')) % num_shards
     logger.info(f"shard: {shard} element: {elem}")
     return (shard, elem)
 
