@@ -328,7 +328,7 @@ def validate_region(output_table: t.Optional[str] = None,
 
 
 def _shard(elem, num_shards: int):
-    shard = zlib.crc32(elem.name.encode('utf-8')) % num_shards
+    shard = zlib.crc32(elem[0].name.encode('utf-8')) % num_shards
     logger.info(f"shard: {shard} element: {elem}")
     return (shard, elem)
 
