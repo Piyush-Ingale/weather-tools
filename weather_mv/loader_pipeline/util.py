@@ -39,6 +39,7 @@ from xarray.core.utils import ensure_us_time_resolution
 import zlib
 from .sinks import DEFAULT_COORD_KEYS
 from .metrics import timeit
+from .ee import AssetData
 
 logger = logging.getLogger(__name__)
 
@@ -350,7 +351,7 @@ class AddTimestamp(beam.DoFn):
     publish time into a tuple.
     """
 
-    def process(self, element, publish_time=beam.DoFn.TimestampParam) -> t.Iterable[t.Tuple[str, str]]:
+    def process(self, element, publish_time=beam.DoFn.TimestampParam) -> t.Iterable[t.Tuple[AssetData, str]]:
         yield (
             element,
             datetime.datetime.utcfromtimestamp(float(publish_time)).strftime(
