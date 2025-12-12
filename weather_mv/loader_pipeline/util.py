@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import abc
+import dataclasses
 import datetime
 import inspect
 import itertools
@@ -39,7 +40,7 @@ from xarray.core.utils import ensure_us_time_resolution
 import zlib
 from .sinks import DEFAULT_COORD_KEYS
 from .metrics import timeit
-from .ee import AssetData
+# from weather_mv.loader_pipeline.ee import AssetData
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,26 @@ def make_attrs_ee_compatible(attrs: t.Dict) -> t.Dict:
         new_attrs[k] = v
 
     return new_attrs
+
+
+@dataclasses.dataclass
+class AssetData:
+    """A class for holding the asset data.
+
+    Attributes:
+        name: The EE-safe name of the asset.
+        target_path: The location of the asset in GCS.
+        channel_names: A list of channel names in the asset.
+        start_time: Image start time in floating point seconds since epoch.
+        end_time: Image end time in floating point seconds since epoch.
+        properties: A dictionary of asset metadata.
+    """
+    name: str
+    target_path: str
+    channel_names: t.List[str]
+    start_time: float
+    end_time: float
+    properties: t.Dict[str, t.Union[str, float, int]]
 
 
 # TODO(#245): Group with common utilities (duplicated)
