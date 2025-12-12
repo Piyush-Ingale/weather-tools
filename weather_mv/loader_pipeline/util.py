@@ -344,6 +344,21 @@ class Shard(beam.DoFn):
     def process(self, element, *args, **kwargs):
         yield _shard(element, num_shards=self.num_shards)
 
+
+class AddTimestamp(beam.DoFn):
+    """Processes each windowed element by extracting the message body and its
+    publish time into a tuple.
+    """
+
+    def process(self, element, publish_time=beam.DoFn.TimestampParam) -> t.Iterable[t.Tuple[str, str]]:
+        yield (
+            element,
+            datetime.datetime.utcfromtimestamp(float(publish_time)).strftime(
+                "%Y-%m-%d %H:%M:%S.%f"
+            ),
+        )
+
+
 class RateLimit(beam.PTransform, abc.ABC):
     """PTransform to extend to apply a global rate limit to an operation.
 
@@ -399,6 +414,7 @@ class RateLimit(beam.PTransform, abc.ABC):
 
     def expand(self, pcol: beam.PCollection):
         return (pcol
+                | beam.ParDo(AddTimestamp())
                 | beam.ParDo(Shard(num_shards=self._num_shards, use_metrics=self.use_metrics))
                 | beam.GroupByKey()
                 | beam.ParDo(
@@ -420,7 +436,7 @@ class _RateLimitDoFn(beam.DoFn):
 
         start_time = datetime.datetime.now()
         end_time = None
-        for elem in elems:
+        for elem, publish_time in elems:
             logger.info(f'RateLimit per element: {elem}')
             if end_time is not None and (end_time - start_time) < self._wait_time:
                 logger.info(f'previous operation took: {(end_time - start_time).total_seconds()}')
