@@ -371,8 +371,12 @@ class AddTimestamp(beam.DoFn):
     """Processes each windowed element by extracting the message body and its
     publish time into a tuple.
     """
+    def __init__(self):
+        super().__init__()
+        self.use_metrics =True
+
     @timeit('IngestToEETimestamp')
-    def process(self, element, publish_time=beam.DoFn.TimestampParam) -> t.Iterable[t.Tuple[AssetData, str]]:
+    def process(self, element, publish_time=beam.DoFn.TimestampParam):
         yield (
             element,
             datetime.datetime.utcfromtimestamp(float(publish_time)).strftime(
@@ -458,7 +462,7 @@ class _RateLimitDoFn(beam.DoFn):
 
         start_time = datetime.datetime.now()
         end_time = None
-        for elem, publish_time in elems:
+        for elem in elems:
             logger.info(f'RateLimit per element: {elem}')
             if end_time is not None and (end_time - start_time) < self._wait_time:
                 logger.info(f'previous operation took: {(end_time - start_time).total_seconds()}')
