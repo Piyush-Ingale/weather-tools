@@ -79,6 +79,9 @@ def timeit(func_name: str, keyed_fn: bool = False):
                 raise ValueError("time_dict not found.")
 
             element, time_dict = args[0]
+            logging.info(f'Args: {args}')
+            logging.info(f'element: {element}')
+            logging.info(f'time_dict: {time_dict}')
             args = (element,) + args[1:]
 
             if not isinstance(time_dict, OrderedDict):
