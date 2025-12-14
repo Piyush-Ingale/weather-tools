@@ -371,7 +371,7 @@ class AddTimestamp(beam.DoFn):
     """Processes each windowed element by extracting the message body and its
     publish time into a tuple.
     """
-    @timeit('IngestToEETimestamp')
+    @timeit('IngestToEETimestamp', keyed_fn=True)
     def process(self, element, publish_time=beam.DoFn.TimestampParam) -> t.Iterable[t.Tuple[AssetData, str]]:
         yield (
             element,
