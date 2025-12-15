@@ -820,8 +820,9 @@ class IngestIntoEETransform(SetupEarthEngine, KwargsFactoryMixin):
             raise
 
     @timeit('IngestIntoEE')
-    def process(self, asset_data: AssetData) -> t.Iterator[t.Tuple[str, float]]:
+    def process(self, asset_data_time_tuple: t.Tuple[AssetData, str]) -> t.Iterator[t.Tuple[str, float]]:
         """Uploads an asset into the earth engine."""
+        asset_data, timestamp = asset_data_time_tuple
         asset_name = self.start_ingestion(asset_data)
         if asset_name:
             metric.Metrics.counter('Success', 'IngestIntoEE').inc()
