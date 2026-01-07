@@ -27,7 +27,8 @@ import metview as mv
 SDK_CONTAINER_IMAGE='gcr.io/weather-tools-prod/weather-tools:0.0.0'
 
 if __name__ == '__main__':
-    logging.getLogger().setLevel(logging.INFO)
+    import metview as mv
+    logging.getLogger().setLevel(logging.DEBUG)
 
     site_pkg = weather_mv.__path__[0]
 
