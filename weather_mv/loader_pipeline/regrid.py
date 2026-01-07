@@ -34,14 +34,15 @@ from .sinks import ToDataSink, open_local, copy
 
 logger = logging.getLogger(__name__)
 
-try:
-    import metview as mv
-    Fieldset = mv.bindings.Fieldset
-except (ModuleNotFoundError, ImportError, FileNotFoundError, ValueError):
-    logger.error('Metview could not be imported.')
-    mv = None  # noqa
-    Fieldset = t.Any
-
+# try:
+#     import metview as mv
+#     Fieldset = mv.bindings.Fieldset
+# except (ModuleNotFoundError, ImportError, FileNotFoundError, ValueError):
+#     logger.error('Metview could not be imported.')
+#     mv = None  # noqa
+#     Fieldset = t.Any
+import metview as mv
+Fieldset = mv.bindings.Fieldset
 
 def _clear_metview():
     """Clear the metview temporary directory.
