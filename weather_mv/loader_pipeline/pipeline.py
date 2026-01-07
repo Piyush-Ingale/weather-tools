@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 import typing as t
+import metview as mv
 import warnings
 
 import apache_beam as beam
