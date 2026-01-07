@@ -22,6 +22,7 @@ import tarfile
 import tempfile
 
 import weather_mv
+import metview as mv
 
 SDK_CONTAINER_IMAGE='gcr.io/weather-tools-prod/weather-tools:0.0.0'
 
