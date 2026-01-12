@@ -17,26 +17,34 @@ ARG py_version=3.11
 FROM apache/beam_python${py_version}_sdk:2.69.0 as beam_sdk
 FROM continuumio/miniconda3:latest
 
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
 # Add the mamba solver for faster builds
 RUN conda install -n base conda-libmamba-solver
 RUN conda config --set solver libmamba
 
 # Create conda env using environment.yml
-ARG weather_tools_git_rev=main
-RUN git clone https://github.com/google/weather-tools.git /weather
+# ARG weather_tools_git_rev=test-beam-latest-deps
+# RUN git      clone https://github.com/Piyush-Ingale/weather-tools.git /weather
+# WORKDIR /weather
+# RUN git checkout "${weather_tools_git_rev}"
+# RUN rm -r /weather/weather_*/test_data/
+COPY . /weather
 WORKDIR /weather
-RUN git checkout "${weather_tools_git_rev}"
-RUN rm -r /weather/weather_*/test_data/
-RUN conda env create -f environment.yml --debug
+RUN conda env create -f environment.yml --debug && conda clean --all -f --yes
 
 # Activate the conda env and update the PATH
 ARG CONDA_ENV_NAME=weather-tools
 RUN echo "source activate ${CONDA_ENV_NAME}" >> ~/.bashrc
 ENV PATH /opt/conda/envs/${CONDA_ENV_NAME}/bin:$PATH
 
-# Install gcloud alpha
 RUN apt-get update -y
+
+# Install curl
+RUN apt-get install curl -y
 RUN gcloud components install alpha --quiet
+
+RUN apt-get update && apt-get install -y libeccodes-dev libeccodes0 libproj-dev libgeos-dev && rm -rf /var/lib/apt/lists/*
 
 # Copy files from official SDK image, including script/dependencies.
 COPY --from=beam_sdk /opt/apache/beam /opt/apache/beam

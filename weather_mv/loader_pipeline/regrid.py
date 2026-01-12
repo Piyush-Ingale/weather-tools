@@ -29,18 +29,20 @@ import dask
 import xarray as xr
 import xarray_beam as xbeam
 from apache_beam.io.filesystems import FileSystems
+from multiprocessing import Process, Queue
 
 from .sinks import ToDataSink, open_local, copy, KwargsFactoryMixin
 
 logger = logging.getLogger(__name__)
 
-# try:
-#     import metview as mv
-#     Fieldset = mv.bindings.Fieldset
-# except (ModuleNotFoundError, ImportError, FileNotFoundError, ValueError):
-#     logger.error('Metview could not be imported.')
-#     mv = None  # noqa
-#     Fieldset = t.Any
+try:
+    import metview as mv
+    Fieldset = mv.bindings.Fieldset
+except (ModuleNotFoundError, ImportError, FileNotFoundError, ValueError):
+    logger.error('Metview could not be imported.')
+    mv = None  # noqa
+    Fieldset = t.Any
+# import metview as mv
 
 def _clear_metview():
     """Clear the metview temporary directory.
@@ -67,101 +69,99 @@ def _metview_op() -> t.Iterator[None]:
         _clear_metview()
 
 
-# class MapChunkAsFieldset(beam.PTransform):
-#     """Apply an operation with MetView on a xarray.Dataset as if it's a metview.Fieldset.
+class MapChunkAsFieldset(beam.PTransform):
+    """Apply an operation with MetView on a xarray.Dataset as if it's a metview.Fieldset.
 
-#     This transform will handle converting to and from xr.Datasets to mv.Fieldsets. This
-#     allows the user to perform any MetView or Fieldset operation within the overridable
-#     `apply()` method.
+    This transform will handle converting to and from xr.Datasets to mv.Fieldsets. This
+    allows the user to perform any MetView or Fieldset operation within the overridable
+    `apply()` method.
 
-#     > Warning: This cannot process large Datasets without a decent amount of disk space!
-#     """
-#     def setup(self):
-        
+    > Warning: This cannot process large Datasets without a decent amount of disk space!
+    """        
 
-#     def apply(self, key: xbeam.Key, fs: Fieldset) -> t.Tuple[xbeam.Key, Fieldset]:
-#         return key, fs
+    def apply(self, key: xbeam.Key, fs: Fieldset) -> t.Tuple[xbeam.Key, Fieldset]:
+        return key, fs
 
-#     def _apply(self, key: xbeam.Key, ds: xr.Dataset) -> t.Tuple[xbeam.Key, xr.Dataset]:
-#         # Clear metadata so ecCodes doesn't mess up the conversion. Instead of default grib fields,
-#         # ecCodes will use the parameter ID. Thus, the fields will appear in the final, regridded
-#         # dataset.
-#         for dv in ds.data_vars:
-#             for to_del in ['GRIB_cfName', 'GRIB_shortName', 'GRIB_cfVarName']:
-#                 if to_del in ds[dv].attrs:
-#                     del ds[dv].attrs[to_del]
+    def _apply(self, key: xbeam.Key, ds: xr.Dataset) -> t.Tuple[xbeam.Key, xr.Dataset]:
+        # Clear metadata so ecCodes doesn't mess up the conversion. Instead of default grib fields,
+        # ecCodes will use the parameter ID. Thus, the fields will appear in the final, regridded
+        # dataset.
+        for dv in ds.data_vars:
+            for to_del in ['GRIB_cfName', 'GRIB_shortName', 'GRIB_cfVarName']:
+                if to_del in ds[dv].attrs:
+                    del ds[dv].attrs[to_del]
 
-#         with _metview_op():
-#             # mv.dataset_to_fieldset() will error on input where there is only 1 value
-#             # in a dimension. ECMWF's cfgrib is in its alpha version.
-#             try:
-#                 fs = mv.dataset_to_fieldset(ds)
-#             except ValueError as e:
-#                 raise ValueError(
-#                     'please change `zarr_input_chunk`s so that there are no'
-#                     'single element dimensions (e.g. {"time": 1} is not allowed).'
-#                 ) from e
+        with _metview_op():
+            # mv.dataset_to_fieldset() will error on input where there is only 1 value
+            # in a dimension. ECMWF's cfgrib is in its alpha version.
+            try:
+                fs = mv.dataset_to_fieldset(ds)
+            except ValueError as e:
+                raise ValueError(
+                    'please change `zarr_input_chunk`s so that there are no'
+                    'single element dimensions (e.g. {"time": 1} is not allowed).'
+                ) from e
 
-#             # Apply any & all MetView or FieldSet operations.
-#             kout, fs_out = self.apply(key, fs)
+            # Apply any & all MetView or FieldSet operations.
+            kout, fs_out = self.apply(key, fs)
 
-#             return kout, fs_out.to_dataset().compute()
+            return kout, fs_out.to_dataset().compute()
 
-#     def expand(self, pcoll):
-#         return pcoll | beam.MapTuple(self._apply)
+    def expand(self, pcoll):
+        return pcoll | beam.MapTuple(self._apply)
 
 
-# @dataclasses.dataclass
-# class RegridChunk(MapChunkAsFieldset):
-#     """Regrid a xarray.Dataset with MetView.
+@dataclasses.dataclass
+class RegridChunk(MapChunkAsFieldset):
+    """Regrid a xarray.Dataset with MetView.
 
-#     Attributes:
-#         regrid_kwargs: A dictionary of keyword-args to be passed into `mv.regrid()`
-#             (excluding the dataset).
-#         zarr_input_chunks: (Optional) When regridding Zarr data, how the input
-#             dataset should be chunked upon open.
-#     """
-#     regrid_kwargs: t.Dict
-#     zarr_input_chunks: t.Optional[t.Dict] = None
+    Attributes:
+        regrid_kwargs: A dictionary of keyword-args to be passed into `mv.regrid()`
+            (excluding the dataset).
+        zarr_input_chunks: (Optional) When regridding Zarr data, how the input
+            dataset should be chunked upon open.
+    """
+    regrid_kwargs: t.Dict
+    zarr_input_chunks: t.Optional[t.Dict] = None
 
-#     def template(self, source_ds: xr.Dataset) -> xr.Dataset:
-#         """Calculate the output Zarr template by regridding (a tiny slice of) the input dataset."""
-#         # Silence Dask warning...
-#         with dask.config.set(**{'array.slicing.split_large_chunks': False}):
-#             zeros = source_ds.chunk().pipe(xr.zeros_like)
+    def template(self, source_ds: xr.Dataset) -> xr.Dataset:
+        """Calculate the output Zarr template by regridding (a tiny slice of) the input dataset."""
+        # Silence Dask warning...
+        with dask.config.set(**{'array.slicing.split_large_chunks': False}):
+            zeros = source_ds.chunk().pipe(xr.zeros_like)
 
-#             # If the chunked source dataset is small (less than 10 MB), just regrid it!
-#             if (zeros.nbytes / 1024 / 1024) < 10:
-#                 _, ds = self._apply(xbeam.Key(), zeros)
-#                 return ds.chunk()
+            # If the chunked source dataset is small (less than 10 MB), just regrid it!
+            if (zeros.nbytes / 1024 / 1024) < 10:
+                _, ds = self._apply(xbeam.Key(), zeros)
+                return ds.chunk()
 
-#             # source_ds is probably very big! Let's shrink it by a non-spatial dimension
-#             # so calculating the template will be tractable...
+            # source_ds is probably very big! Let's shrink it by a non-spatial dimension
+            # so calculating the template will be tractable...
 
-#             # Get a single timeslice of the zeros Dataset (or equivalent chunkable dimension).
-#             # We don't know for sure that 'time' is in the Zarr dataset, so here we make our
-#             # best attempt to find a good slice.
-#             t0 = None
-#             for dim in ['time', *(self.zarr_input_chunks or {}).keys()]:
-#                 if dim in zeros:
-#                     t0 = zeros.isel({dim: 0}, drop=True)
-#                     break
-#             if t0 is None:
-#                 raise ValueError('cannot infer any dimension when creating a Zarr template. '
-#                                  'Please define at least one chunk in `--zarr_input_chunks`.')
+            # Get a single timeslice of the zeros Dataset (or equivalent chunkable dimension).
+            # We don't know for sure that 'time' is in the Zarr dataset, so here we make our
+            # best attempt to find a good slice.
+            t0 = None
+            for dim in ['time', *(self.zarr_input_chunks or {}).keys()]:
+                if dim in zeros:
+                    t0 = zeros.isel({dim: 0}, drop=True)
+                    break
+            if t0 is None:
+                raise ValueError('cannot infer any dimension when creating a Zarr template. '
+                                 'Please define at least one chunk in `--zarr_input_chunks`.')
 
-#             _, ds = self._apply(xbeam.Key(), t0)
-#             # Regrid the single time, then expand the Dataset to span all times.
-#             tmpl = (
-#                 ds
-#                 .chunk()
-#                 .expand_dims({dim: zeros[dim]}, 0)
-#             )
+            _, ds = self._apply(xbeam.Key(), t0)
+            # Regrid the single time, then expand the Dataset to span all times.
+            tmpl = (
+                ds
+                .chunk()
+                .expand_dims({dim: zeros[dim]}, 0)
+            )
 
-#             return tmpl
+            return tmpl
 
-#     def apply(self, key: xbeam.Key, fs: Fieldset) -> t.Tuple[xbeam.Key, Fieldset]:
-#         return key, mv.regrid(data=fs, **self.regrid_kwargs)
+    def apply(self, key: xbeam.Key, fs: Fieldset) -> t.Tuple[xbeam.Key, Fieldset]:
+        return key, mv.regrid(data=fs, **self.regrid_kwargs)
 
 
 @dataclasses.dataclass
@@ -256,88 +256,89 @@ class Regrid(ToDataSink):
         assert len(matches) == 1
         return len(matches[0].metadata_list) > 0
 
-    # def apply(self, uri: str) -> None:
-    #     logger.info(f'Regridding from {uri!r} to {self.target_from(uri)!r}.')
+    def apply(self, uri: str) -> None:
+        logger.info(f'Regridding from {uri!r} to {self.target_from(uri)!r}.')
 
-    #     if self.dry_run:
-    #         return
+        if self.dry_run:
+            return
 
-    #     if self.path_exists(self.target_from(uri), self.force_regrid):
-    #         logger.info(f"Skipping {uri}.")
-    #         return
+        if self.path_exists(self.target_from(uri), self.force_regrid):
+            logger.info(f"Skipping {uri}.")
+            return
 
-    #     with _metview_op():
-    #         try:
-    #             logger.info(f'Copying grib from {uri!r} to local disk.')
+        with _metview_op():
+            try:
+                logger.info(f'Copying grib from {uri!r} to local disk.')
 
-    #             with open_local(uri) as local_grib:
-    #                 logger.info(f"Checking for {uri}'s validity...")
-    #                 if self.is_grib_file_corrupt(local_grib):
-    #                     logger.error(f"Corrupt GRIB file found: {uri}.")
-    #                     return
-    #                 logger.info(f"No issues found with {uri}.")
+                with open_local(uri) as local_grib:
+                    logger.info(f"Checking for {uri}'s validity...")
+                    if self.is_grib_file_corrupt(local_grib):
+                        logger.error(f"Corrupt GRIB file found: {uri}.")
+                        return
+                    logger.info(f"No issues found with {uri}.")
 
-    #                 logger.info(f'Regridding {uri!r} using {self.regrid_kwargs}.')
-    #                 fs = mv.bindings.Fieldset(path=local_grib)
-    #                 fieldset = mv.regrid(data=fs, **self.regrid_kwargs)
+                    logger.info(f'Regridding {uri!r} using {self.regrid_kwargs}.')
+                    fs = mv.bindings.Fieldset(path=local_grib)
+                    fieldset = mv.regrid(data=fs, **self.regrid_kwargs)
 
-    #             with tempfile.NamedTemporaryFile() as src:
-    #                 logger.info(f'Writing {self.target_from(uri)!r} to local disk.')
-    #                 if self.to_netcdf:
-    #                     fieldset.to_dataset().to_netcdf(src.name)
-    #                 else:
-    #                     mv.write(src.name, fieldset)
+                with tempfile.NamedTemporaryFile() as src:
+                    logger.info(f'Writing {self.target_from(uri)!r} to local disk.')
+                    if self.to_netcdf:
+                        fieldset.to_dataset().to_netcdf(src.name)
+                    else:
+                        mv.write(src.name, fieldset)
 
-    #                 src.flush()
+                    src.flush()
 
-    #                 _clear_metview()
+                    _clear_metview()
 
-    #                 logger.info(f'Uploading {self.target_from(uri)!r}.')
+                    logger.info(f'Uploading {self.target_from(uri)!r}.')
 
-    #                 if self.apply_bz2_compression:
-    #                     logger.info(
-    #                         f'Applying bzip2 compression before copying to {self.target_from(uri)!r} ...'
-    #                     )
-    #                     subprocess.run(f"bzip2 -k {src.name}".split())
+                    if self.apply_bz2_compression:
+                        logger.info(
+                            f'Applying bzip2 compression before copying to {self.target_from(uri)!r} ...'
+                        )
+                        subprocess.run(f"bzip2 -k {src.name}".split())
 
-    #                     copy(src.name + '.bz2', self.target_from(uri))
+                        copy(src.name + '.bz2', self.target_from(uri))
 
-    #                     logger.info(f'Cleaning up {src.name}.bz2 ...')
-    #                     os.unlink(src.name + '.bz2')  # Deleting the tempfile.bz2 file.
-    #                 else:
-    #                     copy(src.name, self.target_from(uri))
-    #         except Exception as e:
-    #             logger.info(f'Regrid failed for {uri!r}. Error: {str(e)}')
+                        logger.info(f'Cleaning up {src.name}.bz2 ...')
+                        os.unlink(src.name + '.bz2')  # Deleting the tempfile.bz2 file.
+                    else:
+                        copy(src.name, self.target_from(uri))
+            except Exception as e:
+                logger.info(f'Regrid failed for {uri!r}. Error: {str(e)}')
 
     def expand(self, paths):
         logger.info('jedada')
         if not self.zarr:
-            paths | beam.ParDo(RegridApply(self.output_path, self.regrid_kwargs, self.force_regrid, self.to_netcdf))
+            # paths | beam.ParDo(RegridApply(self.output_path, self.regrid_kwargs, self.force_regrid, self.to_netcdf))
+            paths | beam.Map(self.apply)
             return
 
-        # # Since `chunks=None` here, data will be opened lazily upon access.
-        # # This is used to get the Zarr metadata without loading the data.
-        # source_ds = xr.open_zarr(self.first_uri, **self.zarr_kwargs)
+        # Since `chunks=None` here, data will be opened lazily upon access.
+        # This is used to get the Zarr metadata without loading the data.
+        source_ds = xr.open_zarr(self.first_uri, **self.zarr_kwargs)
 
-        # regrid_op = RegridChunk(self.regrid_kwargs, self.zarr_input_chunks)
+        regrid_op = RegridChunk(self.regrid_kwargs, self.zarr_input_chunks)
 
-        # regridded = (
-        #         paths
-        #         | xbeam.DatasetToChunks(source_ds, self.zarr_input_chunks)
-        #         | 'RegridChunk' >> regrid_op
-        # )
+        regridded = (
+                paths
+                | xbeam.DatasetToChunks(source_ds, self.zarr_input_chunks)
+                | 'RegridChunk' >> regrid_op
+        )
 
-        # tmpl = paths | beam.Create([source_ds]) | 'CalcZarrTemplate' >> beam.Map(regrid_op.template)
+        tmpl = paths | beam.Create([source_ds]) | 'CalcZarrTemplate' >> beam.Map(regrid_op.template)
 
-        # to_write = regridded
-        # if self.zarr_output_chunks:
-        #     to_write |= xbeam.ConsolidateChunks(self.zarr_output_chunks)
+        to_write = regridded
+        if self.zarr_output_chunks:
+            to_write |= xbeam.ConsolidateChunks(self.zarr_output_chunks)
 
-        # to_write | xbeam.ChunksToZarr(self.output_path, beam.pvalue.AsSingleton(tmpl), self.zarr_output_chunks)
+        to_write | xbeam.ChunksToZarr(self.output_path, beam.pvalue.AsSingleton(tmpl), self.zarr_output_chunks)
 
 
-@dataclasses.dataclass
-class RegridApply(beam.DoFn, KwargsFactoryMixin):
+# @dataclasses.dataclass
+# class RegridApply(beam.DoFn, KwargsFactoryMixin):
     output_path: str
     regrid_kwargs: t.Dict
     force_regrid: bool = False
@@ -345,9 +346,9 @@ class RegridApply(beam.DoFn, KwargsFactoryMixin):
     dry_run: bool = False
     apply_bz2_compression: bool = False 
 
-    def setup(self):
-        import metview as mv
-        self.mv = mv
+    # def start_bundle(self):
+    #     import metview as mv
+    #     self.mv = mv
     
     def target_from(self, uri: str) -> str:
         """Create the target path from the input URI.
@@ -385,55 +386,93 @@ class RegridApply(beam.DoFn, KwargsFactoryMixin):
         assert len(matches) == 1
         return len(matches[0].metadata_list) > 0
 
-    def process(self, uri: str) -> None:
-        logger.info(f'Regridding from {uri!r} to {self.target_from(uri)!r}.')
+    def apply(self,  queue: Queue, uri: str) -> None:
+        import metview as mv
+        child_logger = logging.getLogger(__name__)
+        child_logger.addHandler(logging.handlers.QueueHandler(queue))
+        child_logger.info(f'Converting {uri!r} to COGs...')
+        child_logger.info(f'Regridding from {uri} to {self.target_from(uri)}.')
 
         if self.dry_run:
             return
 
         if self.path_exists(self.target_from(uri), self.force_regrid):
-            logger.info(f"Skipping {uri}.")
+            child_logger.info(f"Skipping {uri}.")
+            self.add_to_queue(queue, None)
             return
 
         with _metview_op():
             try:
-                logger.info(f'Copying grib from {uri!r} to local disk.')
+                child_logger.info(f'Copying grib from {uri!r} to local disk.')
 
                 with open_local(uri) as local_grib:
-                    logger.info(f"Checking for {uri}'s validity...")
+                    child_logger.info(f"Checking for {uri}'s validity...")
                     if self.is_grib_file_corrupt(local_grib):
-                        logger.error(f"Corrupt GRIB file found: {uri}.")
-                        return
-                    logger.info(f"No issues found with {uri}.")
+                        child_logger.error(f"Corrupt GRIB file found: {uri}.")
+                        self.add_to_queue(queue, None)
+                    child_logger.info(f"No issues found with {uri}.")
 
-                    logger.info(f'Regridding {uri!r} using {self.regrid_kwargs}.')
-                    fs = self.mv.bindings.Fieldset(path=local_grib)
-                    fieldset = self.mv.regrid(data=fs, **self.regrid_kwargs)
+                    child_logger.info(f'Regridding {uri!r} using {self.regrid_kwargs}.')
+                    fs = mv.bindings.Fieldset(path=local_grib)
+                    fieldset = mv.regrid(data=fs, **self.regrid_kwargs)
 
                 with tempfile.NamedTemporaryFile() as src:
-                    logger.info(f'Writing {self.target_from(uri)!r} to local disk.')
+                    child_logger.info(f'Writing {self.target_from(uri)!r} to local disk.')
                     if self.to_netcdf:
                         fieldset.to_dataset().to_netcdf(src.name)
                     else:
-                        self.mv.write(src.name, fieldset)
+                        mv.write(src.name, fieldset)
 
                     src.flush()
 
                     _clear_metview()
 
-                    logger.info(f'Uploading {self.target_from(uri)!r}.')
+                    child_logger.info(f'Uploading {self.target_from(uri)!r}.')
 
                     if self.apply_bz2_compression:
-                        logger.info(
+                        child_logger.info(
                             f'Applying bzip2 compression before copying to {self.target_from(uri)!r} ...'
                         )
                         subprocess.run(f"bzip2 -k {src.name}".split())
 
                         copy(src.name + '.bz2', self.target_from(uri))
 
-                        logger.info(f'Cleaning up {src.name}.bz2 ...')
+                        child_logger.info(f'Cleaning up {src.name}.bz2 ...')
                         os.unlink(src.name + '.bz2')  # Deleting the tempfile.bz2 file.
                     else:
                         copy(src.name, self.target_from(uri))
             except Exception as e:
-                logger.info(f'Regrid failed for {uri!r}. Error: {str(e)}')
+                child_logger.info(f'Regrid failed for {uri!r}. Error: {str(e)}')
+        
+        self.add_to_queue(queue, None)
+    
+    def add_to_queue(self, queue: Queue, item: t.Any):
+        """Adds a new item to the queue.
+
+        It will wait until the queue has a room to add a new item.
+        """
+        while queue.full():
+            pass
+        queue.put_nowait(item)
+
+    def process(self, uri):
+        queue = Queue(maxsize=1)
+        process = Process(target=self.apply, args=(queue, uri))
+        process.start()
+
+        while True:
+            if not queue.empty():
+                asset_data = queue.get_nowait()
+
+                # Not needed now but keeping this check for backwards compatibility.
+                if asset_data is None:
+                    break
+                yield asset_data
+
+            # When the convert-to-asset process terminates unexpectedly...
+            if not process.is_alive():
+                logger.warning(f'Failed to convert {uri!r} to asset!')
+                break
+
+        process.terminate()
+        logger.info(os.listdir("./"))
